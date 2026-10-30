@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import json
 import os
 import random
 import subprocess
@@ -299,7 +300,7 @@ def run_test_suite(executable, size, mode, reports_enabled=False):
             checker = PushSwapChecker(sequence)
             is_sorted, has_warnings, unnecessary_counts = checker.validate(ops)
             
-            if not is_sorted:
+            if result.returncode != 0 or not is_sorted:
                 sys.stdout.write(f"{COLORS['RED']}!{COLORS['RESET']}")
                 failures.append({
                     "size": size,
@@ -847,7 +848,7 @@ def _exec_and_check(executable, seq, mode=None, timeout=None):
                 "is_sorted": False, "has_warn": False}
     # fd1 (stdout) carries the operations; fd2 (stderr) carries "Error" on
     # invalid input (and the benchmark report only when --bench is used).
-    errored = "Error" in res.stderr
+    errored = res.returncode != 0 or "Error" in res.stderr
     ops = res.stdout.split()
     is_sorted, has_warn, _ = PushSwapChecker(list(seq)).validate(ops)
     return {
@@ -1403,7 +1404,7 @@ def test_memory(executable):
     print(f"\n{COLORS['BOLD']}>> [10/10] Memory & crashes (valgrind / leaks){COLORS['RESET']}")
     if not (shutil.which("valgrind") or shutil.which("leaks")):
         print(f"   {COLORS['YELLOW']}Skipped:{COLORS['RESET']} neither 'valgrind' nor 'leaks' found on PATH.")
-        return 0
+        return 0, True
 
     cases = [
         ("valid 5",        [str(x) for x in random.sample(range(-1000, 1000), 5)]),
@@ -1419,15 +1420,18 @@ def test_memory(executable):
 
     fails = 0
     any_mem_ok = False
+    incomplete = False
     na = f"{COLORS['CYAN']}n/a{COLORS['RESET']}"
     for label, argv in cases:
         r = _run_memcheck(executable, argv)
         if r["timeout"]:
+            incomplete = True
             print("   " + _pad(label, 16) + "| " + _pad(r["tool"] or "--", 9) + "| " + _pad("--", 14)
                   + "| " + _pad("--", 12) + "| " + _pad("--", 8) + f"| {COLORS['YELLOW']}timeout{COLORS['RESET']}")
             continue
         seg, memok, leaked, errors = r["segfault"], r["mem_ok"], r["leaked"], r["errors"]
         any_mem_ok = any_mem_ok or memok
+        incomplete = incomplete or not memok
         bad = seg or (memok and (leaked > 0 or errors > 0))
         if bad:
             fails += 1
@@ -1446,7 +1450,7 @@ def test_memory(executable):
     if not any_mem_ok:
         print(f"   {COLORS['YELLOW']}Note:{COLORS['RESET']} the memory tool could not produce a report "
               f"(broken/!installed); only crash detection was performed.")
-    return fails
+    return fails, incomplete
 
 
 def run_basic_tests(executable):
@@ -1464,7 +1468,7 @@ def run_basic_tests(executable):
     f_mode, w_mode = test_mode_specialization(executable)
     f_default, w_default = test_default_flag(executable)
     w_bench = test_bench(executable)
-    f_mem = test_memory(executable)
+    f_mem, incomplete = test_memory(executable)
 
     total_fails = f_small + f_rev + f_sort + f_near + f_err + f_split + f_mode + f_default + f_mem
     total_warns = w_split + w_mode + w_default + w_bench
@@ -1498,7 +1502,7 @@ def run_basic_tests(executable):
     if total_warns:
         overall += f"   {COLORS['YELLOW']}({total_warns} warning(s)){COLORS['RESET']}"
     print("  " + overall)
-    return total_fails, total_warns
+    return total_fails, total_warns, incomplete
 
 
 # ==========================================
@@ -1698,6 +1702,14 @@ def print_reports_suggestion():
 def main():
     global GEN_RANGE
     args = sys.argv[1:]
+    report_path = None
+    if '--report' in args:
+        index = args.index('--report')
+        if index + 1 >= len(args) or args.count('--report') != 1:
+            print('Error: --report requires one path.')
+            sys.exit(1)
+        report_path = args[index + 1]
+        del args[index:index + 2]
 
     reports_enabled = False
     if '--reports' in args:
@@ -1753,6 +1765,10 @@ def main():
             print(f"   Build your bonus checker (e.g. `make bonus`) and place it there. Skipping bonus.\n")
             checker = None
 
+    if report_path and (bigo_mode or basic_only or bonus or len(args) != 1):
+        print('Error: --report supports the full default suite only.')
+        sys.exit(1)
+
     if bigo_mode:
         run_bigo_analysis(executable)
         if checker:
@@ -1760,7 +1776,7 @@ def main():
         sys.exit(0)
 
     if basic_only:
-        fails, _ = run_basic_tests(executable)
+        fails, _, _ = run_basic_tests(executable)
         bonus_fails = run_bonus_tests(executable, checker) if checker else 0
         sys.exit(1 if (fails or bonus_fails) else 0)
 
@@ -1772,7 +1788,7 @@ def main():
         print(f"{COLORS['BOLD']}Running FULL TEST SUITE for {executable}{COLORS['RESET']}\n")
 
         # Basic / edge-case tests run first, before the performance suite.
-        run_basic_tests(executable)
+        basic_fails, _, incomplete = run_basic_tests(executable)
 
         sizes = [100, 500]
         modes = ["simple", "medium", "complex", "adaptive"]
@@ -1842,6 +1858,14 @@ def main():
 
     if checker:
         run_bonus_tests(executable, checker)
+
+    if report_path:
+        failed = len(all_failures) + (1 if basic_fails else 0)
+        total = len(results) * 100 + 1
+        report = {"version": 1, "total": total, "passed": total - failed,
+                  "failed": failed, "errors": 0, "skipped": 0, "incomplete": incomplete}
+        with open(report_path, "w", encoding="utf-8") as output:
+            json.dump(report, output)
 
 
 if __name__ == "__main__":
