@@ -547,3 +547,12 @@ SIZE   | MODE     | MAX (GRADE)        | MIN (GRADE)        | AVG (GRADE)       
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+### 42TUI structured report
+
+Pass `--report PATH` with the full default suite to write a version 1 JSON
+summary. The basic suite counts as one check; each of the 800 performance runs
+counts separately. A missing, failed or timed-out memory-tool report marks the
+summary incomplete. Warnings and the optional benchmark are informational.
+The report is written only after the suite completes; a successful process exit
+alone does not mean the tests passed.
